@@ -1,17 +1,26 @@
+require('dotenv').config();
 /**
  * LiveMail Classifier - Main Server
  * Real-time email categorization with Gmail API and NLP
  */
 
-require('dotenv').config();
-
 const express = require('express');
 const http = require('http');
+
+// Global error handlers to prevent server crashes from unhandled promise rejections (like MongoDB timeouts)
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('Uncaught Exception:', error);
+});
+
 const { Server } = require('socket.io');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const connectDB = require('./config/database');
-const { initializeClassifier, loadClassifier, isTrained } = require('./services/classifier');
+const { loadClassifier, isTrained } = require('./services/classifier');
 const { pollAllUsers } = require('./services/gmailService');
 const emailRoutes = require('./routes/emailRoutes');
 const authRoutes = require('./routes/authRoutes');
@@ -26,11 +35,11 @@ const server = http.createServer(app);
 // Socket.io setup with CORS
 const io = new Server(server, {
     cors: {
-        origin: process.env.SOCKET_CORS_ORIGIN || 'http://localhost:3000',
+        origin: ['http://localhost:3000', 'http://127.0.0.1:3000'],
         methods: ['GET', 'POST'],
         credentials: true
     },
-    transports: ['websocket', 'polling']
+    transports: ['polling', 'websocket'] // Allow polling fallback first
 });
 
 // Store io in app for access in routes
@@ -42,7 +51,7 @@ const POLL_INTERVAL = parseInt(process.env.GMAIL_POLL_INTERVAL) || 60000; // 60 
 
 // Middleware
 app.use(cors({
-    origin: process.env.SOCKET_CORS_ORIGIN || 'http://localhost:3000',
+    origin: ['http://localhost:3000', 'http://127.0.0.1:3000'],
     credentials: true
 }));
 app.use(express.json());
@@ -50,12 +59,14 @@ app.use(express.urlencoded({ extended: true }));
 
 // Sessions
 app.use(session({
-    secret: process.env.SESSION_SECRET || 'livemail_secret_key',
+    secret: process.env.SESSION_SECRET || 'livemail_dev_session_secret_key',
     resave: false,
     saveUninitialized: false,
     store: MongoStore.create({ mongoUrl: process.env.MONGO_URI }),
     cookie: {
-        secure: process.env.NODE_ENV === 'production',
+        secure: false, // Must be false for local HTTP development
+        httpOnly: true,
+        sameSite: 'lax',
         maxAge: 24 * 60 * 60 * 1000 // 24 hours
     }
 }));
@@ -82,7 +93,9 @@ const apiLimiter = rateLimit({
 app.use('/api', apiLimiter);
 
 // Routes
-app.use('/', authRoutes);
+app.use('/auth', authRoutes);
+app.use('/api/auth', authRoutes);
+app.use('/', authRoutes); // Handles root /oauth2callback, /user, /logout
 app.use('/api/emails', emailRoutes);
 
 // Health check endpoint
@@ -164,6 +177,12 @@ const startPolling = () => {
 };
 
 const performPoll = async () => {
+    const mongoose = require('mongoose');
+    if (mongoose.connection.readyState !== 1) {
+        // Database not ready yet, skip this polling tick safely
+        return;
+    }
+
     try {
         await pollAllUsers(io);
     } catch (error) {
@@ -181,26 +200,10 @@ const stopPolling = () => {
 
 // Initialize application
 const initializeApp = async () => {
-    try {
-        // Connect to MongoDB
-        await connectDB();
-        console.log('Database connected');
-
-        // Initialize classifier
-        const loaded = await loadClassifier();
-        if (!loaded) {
-            console.log('No saved classifier found. Run "npm run seed" to train the classifier.');
-            initializeClassifier();
-        }
-
-        if (!isTrained()) {
-            console.warn('WARNING: Classifier is not trained. Email categorization may be inaccurate.');
-            console.warn('Run "npm run seed" to train the classifier with sample data.');
-        }
-
-        // Start HTTP server
-        server.listen(PORT, () => {
-            console.log(`
+    // Start HTTP server immediately
+    server.listen(PORT, () => {
+        console.log(`Server listening on port ${PORT}`);
+        console.log(`
 ╔═══════════════════════════════════════════════════════════╗
 ║                                                           ║
 ║   📧 LiveMail Classifier Server                          ║
@@ -217,11 +220,27 @@ const initializeApp = async () => {
 ║   Polling interval: ${POLL_INTERVAL / 1000} seconds                            ║
 ║                                                           ║
 ╚═══════════════════════════════════════════════════════════╝
-            `);
+        `);
+    });
 
-            // Start email polling
+    try {
+        // Connect to MongoDB
+        try {
+            await connectDB();
+            console.log('Database connected successfully.');
+            // Start email polling only after DB is up
             startPolling();
-        });
+        } catch (dbError) {
+            console.error('MongoDB Connection Failed:', dbError.message);
+            console.error('Server is running on port 5000, but database features are disabled.');
+        }
+
+        // Initialize NVIDIA NIM classifier
+        try {
+            await loadClassifier();
+        } catch (classifierErr) {
+            console.error('Classifier initialization error:', classifierErr.message);
+        }
 
         // Graceful shutdown
         process.on('SIGTERM', () => {
@@ -243,8 +262,7 @@ const initializeApp = async () => {
         });
 
     } catch (error) {
-        console.error('Failed to initialize application:', error);
-        process.exit(1);
+        console.error('Failed to initialize application modules:', error);
     }
 };
 

@@ -74,7 +74,7 @@ const fetchMessageDetails = async (gmail, messageId) => {
             parsed.from?.text || ''
         ].join(' ').substring(0, 5000);
 
-        const classification = classifyEmail(emailContent);
+        const classification = await classifyEmail(parsed.subject || '', parsed.text || '');
         const fromEmail = parsed.from?.value?.[0]?.address || parsed.from?.text || 'Unknown';
 
         return {

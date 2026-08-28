@@ -18,7 +18,7 @@ const Dashboard = () => {
     const [emails, setEmails] = useState([]);
     const [selectedEmail, setSelectedEmail] = useState(null);
     const [activeCategory, setActiveCategory] = useState('All');
-    const [stats, setStats] = useState({});
+    const [stats, setStats] = useState({ total: 0, primary: 0, social: 0, promotions: 0, updates: 0, spam: 0 });
     const [isComposeOpen, setIsComposeOpen] = useState(false);
     const [composeData, setComposeData] = useState({ to: '', subject: '', body: '' });
     const [loading, setLoading] = useState(true);
@@ -38,20 +38,38 @@ const Dashboard = () => {
         { name: 'Uncategorized', icon: AlertCircle, color: 'text-gray-400' }
     ];
 
+    // Normalize email category to match sidebar tab names
+    const normalizeCategory = (cat) => {
+        if (!cat) return 'Uncategorized';
+        const text = cat.toString().trim().toLowerCase();
+        if (text.includes('personal') || text.includes('friend') || text.includes('family') || text.includes('social')) return 'Personal';
+        if (text.includes('business') || text.includes('corporate') || text.includes('client')) return 'Business';
+        if (text.includes('finance') || text.includes('bank') || text.includes('payment') || text.includes('invoice') || text.includes('bill') || text.includes('transaction')) return 'Finance';
+        if (text.includes('security') || text.includes('password') || text.includes('verif') || text.includes('otp') || text.includes('spam') || text.includes('suspicious')) return 'Security';
+        if (text.includes('work') || text.includes('office') || text.includes('project') || text.includes('meeting') || text.includes('task') || text.includes('team')) return 'Work';
+        if (text.includes('college') || text.includes('school') || text.includes('university') || text.includes('academic') || text.includes('course') || text.includes('assignment') || text.includes('education')) return 'College/School';
+        if (text.includes('promotion') || text.includes('promo') || text.includes('offer') || text.includes('discount') || text.includes('sale') || text.includes('newsletter') || text.includes('marketing') || text.includes('update')) return 'Promotion';
+        // Check for exact match (case-insensitive) against valid categories
+        const exactMatch = ['Personal', 'Business', 'Finance', 'Security', 'Work', 'College/School', 'Promotion', 'Uncategorized']
+            .find(c => c.toLowerCase() === text);
+        if (exactMatch) return exactMatch;
+        return 'Uncategorized';
+    };
+
     const fetchEmails = useCallback(async () => {
         try {
             setLoading(true);
             const response = await axios.get(`${SOCKET_URL}/api/emails`, { withCredentials: true });
-            if (response.data.success) {
-                setEmails(response.data.data);
-            }
+            const emailList = Array.isArray(response.data) ? response.data : (response.data?.emails || response.data?.data || []);
+            setEmails(emailList);
             
             const statsResponse = await axios.get(`${SOCKET_URL}/api/emails/stats`, { withCredentials: true });
             if (statsResponse.data.success) {
-                setStats(statsResponse.data.data.categories);
+                setStats(statsResponse.data.stats?.categories || statsResponse.data.data?.categories || { total: 0, primary: 0, social: 0, promotions: 0, updates: 0, spam: 0 });
             }
         } catch (error) {
             console.error('Error fetching emails:', error);
+            setEmails([]);
         } finally {
             setLoading(false);
         }
@@ -61,27 +79,34 @@ const Dashboard = () => {
         fetchEmails();
 
         const socket = io(SOCKET_URL, {
-            transports: ['websocket', 'polling'],
-            withCredentials: true
+            transports: ['polling', 'websocket'],
+            withCredentials: true,
+            reconnection: true,
+            reconnectionAttempts: 10,
+            reconnectionDelay: 1000,
         });
 
         socket.on('connect', () => {
             setIsConnected(true);
-            socket.emit('join-room', user.email);
+            if (user?.email) {
+                socket.emit('join-room', user.email);
+            }
         });
 
         socket.on('disconnect', () => setIsConnected(false));
 
         socket.on('new-email', (email) => {
             setEmails(prev => [email, ...prev]);
-            setStats(prev => ({
-                ...prev,
-                [email.category]: (prev[email.category] || 0) + 1
-            }));
         });
 
-        return () => socket.disconnect();
-    }, [user.email, fetchEmails]);
+        return () => {
+            if (socket.connected) {
+                socket.disconnect();
+            } else {
+                socket.close();
+            }
+        };
+    }, [user?.email, fetchEmails]);
 
     const handleSendEmail = async (e) => {
         e.preventDefault();
@@ -90,16 +115,24 @@ const Dashboard = () => {
             if (response.data.success) {
                 setIsComposeOpen(false);
                 setComposeData({ to: '', subject: '', body: '' });
-                // Show success toast here if you want
             }
         } catch (error) {
             console.error('Error sending email:', error);
         }
     };
 
-    const filteredEmails = activeCategory === 'All' 
-        ? emails 
-        : emails.filter(e => e.category === activeCategory);
+    // Filter emails by active category using normalized matching
+    const filteredEmails = activeCategory === 'All'
+        ? emails
+        : emails.filter(e => normalizeCategory(e.category) === activeCategory);
+
+    // Calculate live counts per category for sidebar badges
+    const categoryCounts = emails.reduce((acc, email) => {
+        const cat = normalizeCategory(email.category);
+        acc[cat] = (acc[cat] || 0) + 1;
+        acc['All'] = (acc['All'] || 0) + 1;
+        return acc;
+    }, { All: 0, Personal: 0, Business: 0, Finance: 0, Security: 0, Work: 0, 'College/School': 0, Promotion: 0, Uncategorized: 0 });
 
     return (
         <div className="flex h-screen bg-black overflow-hidden font-sans">
@@ -136,11 +169,11 @@ const Dashboard = () => {
                                     <cat.icon size={18} className={activeCategory === cat.name ? 'text-blue-400' : 'text-gray-500'} />
                                     <span className="font-medium text-sm">{cat.name}</span>
                                 </div>
-                                {stats[cat.name] > 0 && (
+                                {(categoryCounts[cat.name] || 0) > 0 && (
                                     <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
                                         activeCategory === cat.name ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400'
                                     }`}>
-                                        {stats[cat.name]}
+                                        {categoryCounts[cat.name]}
                                     </span>
                                 )}
                             </button>
@@ -205,7 +238,7 @@ const Dashboard = () => {
                     <div className="max-w-5xl mx-auto">
                         <div className="flex items-center justify-between mb-6">
                             <h2 className="text-2xl font-bold">{activeCategory}</h2>
-                            <p className="text-sm text-gray-500">{filteredEmails.length} messages</p>
+                            <p className="text-sm text-gray-500">{filteredEmails?.length || 0} messages</p>
                         </div>
 
                         {loading ? (
@@ -213,7 +246,7 @@ const Dashboard = () => {
                                 <div className="w-12 h-12 border-4 border-blue-600/20 border-t-blue-600 rounded-full animate-spin" />
                                 <p className="text-gray-500 animate-pulse">Loading your inbox...</p>
                             </div>
-                        ) : filteredEmails.length === 0 ? (
+                        ) : (filteredEmails?.length || 0) === 0 ? (
                             <div className="flex flex-col items-center justify-center h-96 border-2 border-dashed border-white/5 rounded-3xl">
                                 <div className="bg-gray-900/50 p-6 rounded-full mb-4">
                                     <Inbox size={48} className="text-gray-700" />

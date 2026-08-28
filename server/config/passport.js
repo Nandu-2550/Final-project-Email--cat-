@@ -1,59 +1,64 @@
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
-const User = require('../models/User');
+const mongoose = require('mongoose');
+
+global.activeTokens = global.activeTokens || new Map();
 
 passport.serializeUser((user, done) => {
-    done(null, user.id);
+  done(null, user._id || user.googleId);
 });
 
 passport.deserializeUser(async (id, done) => {
-    try {
-        const user = await User.findById(id);
-        done(null, user);
-    } catch (err) {
-        done(err, null);
+  try {
+    let user = null;
+    if (mongoose.Types.ObjectId.isValid(id) && id.length === 24) {
+      const User = require('../models/User');
+      user = await User.findById(id).catch(() => null);
     }
+    if (!user && global.activeTokens.has(id)) {
+      user = global.activeTokens.get(id);
+    }
+    done(null, user || { _id: id, googleId: id });
+  } catch (err) {
+    done(null, { _id: id, googleId: id });
+  }
 });
 
-passport.use(new GoogleStrategy({
-    clientID: process.env.GOOGLE_CLIENT_ID,
-    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-    callbackURL: process.env.GOOGLE_REDIRECT_URI || "http://localhost:5000/oauth2callback",
-    passReqToCallback: true
-}, async (req, accessToken, refreshToken, profile, done) => {
-    try {
-        // Check if user already exists
-        let user = await User.findOne({ googleId: profile.id });
+passport.use(
+  new GoogleStrategy(
+    {
+      clientID: process.env.GOOGLE_CLIENT_ID,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+      callbackURL: process.env.GOOGLE_CALLBACK_URL || 'http://localhost:5000/oauth2callback',
+    },
+    async (accessToken, refreshToken, profile, done) => {
+      const userPayload = {
+        _id: profile.id,
+        googleId: profile.id,
+        name: profile.displayName,
+        email: profile.emails?.[0]?.value || 'user@example.com',
+        picture: profile.photos?.[0]?.value,
+        accessToken,
+        refreshToken,
+      };
 
-        const userData = {
-            googleId: profile.id,
-            email: profile.emails[0].value,
-            displayName: profile.displayName,
-            profilePicture: profile.photos[0].value,
-            accessToken: accessToken,
-            lastLogin: new Date()
-        };
+      global.activeTokens.set(profile.id, userPayload);
+      if (userPayload.email) global.activeTokens.set(userPayload.email, userPayload);
 
-        // Only update refresh token if we got a new one
-        if (refreshToken) {
-            userData.refreshToken = refreshToken;
-        }
-
-        if (user) {
-            // Update existing user
-            user = await User.findByIdAndUpdate(user._id, userData, { new: true });
-            return done(null, user);
-        } else {
-            // Create new user
-            if (!refreshToken) {
-                console.warn('No refresh token received for new user. Polling may not work offline.');
-            }
-            user = await User.create(userData);
-            return done(null, user);
-        }
-    } catch (err) {
-        return done(err, null);
+      try {
+        const User = require('../models/User');
+        let user = await User.findOneAndUpdate(
+          { googleId: profile.id },
+          userPayload,
+          { upsert: true, new: true }
+        );
+        return done(null, user || userPayload);
+      } catch (err) {
+        console.warn('Using in-memory user fallback:', err.message);
+        return done(null, userPayload);
+      }
     }
-}));
+  )
+);
 
 module.exports = passport;

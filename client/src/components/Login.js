@@ -1,10 +1,21 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Mail, Shield, Zap, BarChart3 } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
+import { useNavigate } from 'react-router-dom';
 
 const Login = () => {
+    const { user, loading } = useAuth();
+    const navigate = useNavigate();
+
+    useEffect(() => {
+        if (!loading && user) {
+            navigate('/dashboard');
+        }
+    }, [user, loading, navigate]);
+
     const handleLogin = () => {
-        window.location.href = `${process.env.REACT_APP_SOCKET_URL || 'http://localhost:5000'}/auth/google`;
+        window.location.href = 'http://localhost:5000/auth/google';
     };
 
     return (
